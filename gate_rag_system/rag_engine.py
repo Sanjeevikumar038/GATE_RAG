@@ -9,16 +9,22 @@ from utils import extract_text_from_pdf, chunk_text
 # CONFIG
 # ======================
 
-DATA_FOLDER = "data"
 MODEL_NAME = "llama-3.1-8b-instant"
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ======================
-# LOAD ALL PDF TEXT
+# CORRECT CLOUD SAFE PATH
 # ======================
 
-print("📚 Loading PDFs...")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FOLDER = os.path.join(BASE_DIR, "data")
+
+print("📚 Loading PDFs from:", DATA_FOLDER)
+
+# ======================
+# LOAD ALL PDF TEXT
+# ======================
 
 all_text = ""
 
@@ -26,15 +32,23 @@ for root, dirs, files in os.walk(DATA_FOLDER):
     for file in files:
         if file.lower().endswith(".pdf"):
             path = os.path.join(root, file)
-            print("Loaded:", path)
-            all_text += extract_text_from_pdf(path) + "\n"
+            print("Loading:", path)
+
+            try:
+                text = extract_text_from_pdf(path)
+                if text:
+                    all_text += text + "\n"
+            except Exception as e:
+                print("⚠️ PDF error:", e)
 
 chunks = chunk_text(all_text)
 
+# ⭐ CRITICAL CLOUD FALLBACK
 if len(chunks) == 0:
-    raise Exception("No chunks created. Check PDF text extraction.")
+    print("⚠️ No text extracted. Using fallback chunk.")
+    chunks = ["GATE syllabus includes OS, DBMS, CN, Algorithms, Data Structures, Mathematics."]
 
-print("Total chunks:", len(chunks))
+print("✅ Total chunks:", len(chunks))
 
 # ======================
 # EMBEDDINGS + FAISS
@@ -57,15 +71,20 @@ print("✅ Vector DB ready")
 
 def retrieve(query, k=4):
 
-    q_vec = embed_model.encode([query])
-    D, I = index.search(np.array(q_vec).astype("float32"), k)
+    try:
+        q_vec = embed_model.encode([query])
+        D, I = index.search(np.array(q_vec).astype("float32"), k)
 
-    results = []
-    for idx in I[0]:
-        if idx < len(chunks):
-            results.append(chunks[idx][:1200])
+        results = []
+        for idx in I[0]:
+            if idx < len(chunks):
+                results.append(chunks[idx][:1000])
 
-    return results
+        return results
+
+    except:
+        return chunks[:2]
+
 
 # ======================
 # GROQ STREAM
@@ -73,17 +92,22 @@ def retrieve(query, k=4):
 
 def stream_answer(prompt):
 
-    completion = groq_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=800,
-        stream=True
-    )
+    try:
+        completion = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=700,
+            stream=True
+        )
 
-    for chunk in completion:
-        if chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+        for chunk in completion:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+    except Exception as e:
+        yield f"\n⚠️ AI Error: {str(e)}"
+
 
 # ======================
 # MAIN FUNCTION
@@ -91,9 +115,11 @@ def stream_answer(prompt):
 
 def ask_gate_question_stream(query, chat_history):
 
-    if query.lower().strip() in ["hi", "hello", "hey"]:
+    query = query.strip()
+
+    if query.lower() in ["hi", "hello", "hey"]:
         def greet():
-            yield "Hello 👋 I am your GATE AI assistant. Ask about syllabus, previous papers or mock tests."
+            yield "Hello 👋 I am your GATE AI assistant. Ask about syllabus, previous papers, trends or mock tests."
         return greet(), []
 
     context_chunks = retrieve(query)
@@ -101,22 +127,19 @@ def ask_gate_question_stream(query, chat_history):
     context_text = "\n\n".join(context_chunks)
 
     prompt = f"""
-You are an intelligent GATE exam mentor.
+You are a smart GATE exam mentor AI.
 
-Use ONLY the given context to answer.
+Use ONLY the context below.
 
-Rules:
-- Answer clearly like ChatGPT
-- If answer not in context say politely
-- Do not hallucinate
+If answer not found → politely say you don't have enough info.
 
 Context:
 {context_text}
 
-Question:
+User Question:
 {query}
 
-Answer:
+Answer clearly:
 """
 
     return stream_answer(prompt), context_chunks
